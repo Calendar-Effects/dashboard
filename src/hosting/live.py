@@ -12,7 +12,8 @@ into data/live/ and reads it exactly like a local run.
     python3 src/streaming/job.py --source files --fresh --publish-live
 
 The repository holds:
-    current.json                                        {"run_id", "started_utc", "updated_utc", "batches"}
+    current.json        {"run_id", "started_utc", "updated_utc", "batches", "finished"}: the newest run;
+                        "batches" counts micro-batches with data, "finished" is true once the job stops
     runs/<run_id>/<signals|event_car|predictions>/batch_id=N/part-0.parquet and _SUCCESS
 
 --publish-live needs --out to be a local folder (not HDFS), and a Hugging Face login.
@@ -88,24 +89,24 @@ class LivePublisher:
         while not self.stop.wait(self.every):
             self.push()
 
-    def push(self, force: bool = False):
+    def push(self, force: bool = False, finished: bool = False):
         with self.lock:
             batches, self.pending = self.pending, []
         if not batches and not force:
             return
         staging = Path(tempfile.mkdtemp(prefix="calendar-effects-live-"))
         try:
-            for b in batches:
-                stage_batch(self.out_dir, b, staging, self.run_id)
+            with_data = sum(stage_batch(self.out_dir, b, staging, self.run_id) > 0 for b in batches)
             (staging / CURRENT).write_text(json.dumps({
                 "run_id": self.run_id, "started_utc": self.started,
                 "updated_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                "batches": self.published + len(batches)}))
+                "batches": self.published + with_data, "finished": finished}))
             self.api.upload_folder(repo_id=self.repo_id, repo_type="dataset", folder_path=staging,
-                                   commit_message=f"live run {self.run_id}: {len(batches)} micro-batches")
-            self.published += len(batches)
-            if batches:
-                print(f"live feed: published {len(batches)} micro-batches ({self.published} in this run)")
+                                   commit_message=f"live run {self.run_id}: {with_data} micro-batches"
+                                                  + (" (finished)" if finished else ""))
+            self.published += with_data
+            if with_data:
+                print(f"live feed: published {with_data} micro-batches ({self.published} in this run)")
         except Exception as e:                   # keep streaming; try these batches again next time
             print(f"live feed: upload failed ({e}); will retry")
             with self.lock:
@@ -114,9 +115,10 @@ class LivePublisher:
             shutil.rmtree(staging, ignore_errors=True)
 
     def close(self):
+        """Publish what is left and mark the run finished (the job stopped normally)."""
         self.stop.set()
         self.thread.join()
-        self.push(force=True)
+        self.push(force=True, finished=True)
 
 
 def mirror(cache_dir: Path, repo_id: str = LIVE_REPO) -> dict | None:
@@ -152,3 +154,18 @@ def mirror(cache_dir: Path, repo_id: str = LIVE_REPO) -> dict | None:
 def age_seconds(current: dict) -> float:
     """Seconds since the live run last published."""
     return time.time() - datetime.fromisoformat(current["updated_utc"]).timestamp()
+
+
+# A running job publishes every --publish-every seconds (15 by default), so a run that has
+# been quiet for this long without saying it finished has most likely been stopped.
+QUIET_SECONDS = 120
+
+
+def run_state(current: dict | None) -> str:
+    """'live' (streaming now), 'finished' (stopped normally), 'stopped' (went quiet without
+    finishing: stopped with Ctrl-C, crashed, or the laptop went offline), or 'none'."""
+    if not current or "run_id" not in current:
+        return "none"
+    if current.get("finished"):
+        return "finished"
+    return "live" if age_seconds(current) < QUIET_SECONDS else "stopped"

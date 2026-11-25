@@ -254,11 +254,20 @@ def live_view():
                         "with `--publish-live` (see the About view), or watch the recorded stream in "
                         f"**{REPLAY}**." + (f"\n\n({current['error']})" if current else ""))
                 return
-            from hosting.live import age_seconds
-            age = age_seconds(current)
-            state = "live now" if age < 120 else f"last update {age / 60:.0f} min ago"
-            st.caption(f"Online live feed · run {current['run_id']} · {state} · {current['batches']} micro-batches "
-                       f"published · [{LIVE_REPO}](https://huggingface.co/datasets/{LIVE_REPO})")
+            from hosting.live import age_seconds, run_state
+            age, state, n = age_seconds(current), run_state(current), current["batches"]
+            ago = f"{age:.0f} s" if age < 120 else f"{age / 60:.0f} min" if age < 7200 else f"{age / 3600:.0f} h"
+            feed = f"[{LIVE_REPO}](https://huggingface.co/datasets/{LIVE_REPO})"
+            if state == "live":
+                st.success(f"**● Live now:** run {current['run_id']} is streaming; last update {ago} ago, "
+                           f"{n} micro-batches so far. This page refreshes every {refresh} s. ({feed})")
+            else:
+                why = ("it finished normally" if state == "finished" else
+                       "it stopped without finishing (stopped by hand, or the computer went offline)")
+                st.warning(f"**No run is streaming right now.** Below is where the last run ended: run "
+                           f"{current['run_id']}, {n} micro-batches, {why} {ago} ago. To show a run live, start the "
+                           f"job with `--publish-live` (see About); to watch the stream move now, open **{REPLAY}**. "
+                           f"({feed})")
             folder = current["folder"]
         signals = read_stream("stream_signals", folder)
         if signals.empty:
@@ -474,8 +483,12 @@ def main():
     st.title("Calendar Effects")
     st.caption("Retail stocks and Wikipedia attention around shopping events, streamed through Kafka and Spark "
                "Structured Streaming, with a Spark MLlib model of tomorrow's big moves.")
-    view = st.radio("View", VIEWS, horizontal=True, label_visibility="collapsed",
-                    index=0 if has_batches(STREAM_DIR) else 1)
+    # Open on Live stream when there is one to watch: this computer's stream (a laptop next to the
+    # job), or a run streaming to the live feed right now (the hosted app during a demo).
+    from hosting.live import run_state
+    feed = live_feed()
+    streaming = has_batches(STREAM_DIR) or run_state(feed if feed and "error" not in feed else None) == "live"
+    view = st.radio("View", VIEWS, horizontal=True, label_visibility="collapsed", index=0 if streaming else 1)
     {VIEWS[0]: live_view, VIEWS[1]: replay_view, VIEWS[2]: event_view, VIEWS[3]: about_view}[view]()
 
 
