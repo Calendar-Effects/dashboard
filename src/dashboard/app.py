@@ -101,20 +101,27 @@ def calendar() -> pd.DataFrame:
     return events[["event_type", "event_date"]].drop_duplicates().sort_values("event_date")
 
 
-@st.cache_data(show_spinner=False)
+# The snapshot is cached, keyed by its file's modification time: the hosted app's process outlives
+# a redeploy, so a cache keyed by name alone would keep serving the old recording. (Streamlit leaves
+# arguments starting with "_" out of the key, so these names must not start with one.)
 def snapshot(name: str) -> dict | None:
     path = SNAPSHOT_DIR / f"{name}.json"
-    return json.loads(path.read_text()) if path.exists() else None
+    return read_json(str(path), path.stat().st_mtime) if path.exists() else None
+
+
+@st.cache_data(show_spinner=False)
+def read_json(path: str, modified: float) -> dict:
+    return json.loads(Path(path).read_text())
 
 
 def replay_frames() -> dict | None:
     """The recorded stream (hosting/snapshot/) as the tables the live view reads."""
     path = SNAPSHOT_DIR / "replay.json"
-    return _replay_frames(path.stat().st_mtime) if path.exists() else None
+    return replay_tables(path.stat().st_mtime) if path.exists() else None
 
 
 @st.cache_data(show_spinner=False)
-def _replay_frames(_built: float) -> dict:          # _built: read again when the recording changes
+def replay_tables(modified: float) -> dict:         # modified: read again when the recording changes
     r = snapshot("replay")
     days = pd.to_datetime(pd.Series(r["days"]))
     tickers = pd.DataFrame(r["tickers"])
