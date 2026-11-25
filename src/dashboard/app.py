@@ -28,6 +28,10 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+from dashboard import reloader
+
+reloader.refresh()   # a redeploy keeps old modules in memory; reload the project's own if they changed
+
 from common.contracts import expand_events, load_retailers
 from common.settings import (DASHBOARD_URL, LINKS, LIVE_CACHE_DIR, LIVE_REPO, SNAPSHOT_DIR, STREAM_DIR,
                              STREAM_SUBDIRS)
