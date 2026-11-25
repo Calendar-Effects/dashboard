@@ -1,6 +1,11 @@
 # Streamlit settings for the hosted dashboard (copied to .streamlit/config.toml).
-[theme]
+# Colours go in separate light and dark themes: a plain [theme] section would replace Streamlit's
+# Light and Dark themes and hide the viewer's System / Light / Dark choice in the app menu.
+[theme.light]
 primaryColor = "#2a78d6"
+
+[theme.dark]
+primaryColor = "#3987e5"
 
 [server]
 headless = true
