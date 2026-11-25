@@ -8,9 +8,10 @@ Four views:
   Live stream     the streaming job's output as it is written: today's alerts, tomorrow's watchlist
                   from the big-move model, event CARs as windows close, alerts per day, one retailer.
                   Source: this computer's data/stream/ folder, or the online live feed that the job
-                  publishes automatically (src/hosting/live.py), which is what the hosted app shows.
-  Replay          the same view over the recorded 2024-2025 stream (the model's test years), played
-                  day by day from hosting/snapshot/replay.json (src/hosting/snapshot.py).
+                  publishes with --publish-live (src/hosting/live.py), which is what the hosted app shows.
+  Replay          the same view over the recorded stream, any range of years (by default the big-move
+                  model's test years, which it never saw in training), played day by day from
+                  hosting/snapshot/ (replay.json and replay_rows.parquet, src/hosting/snapshot.py).
   Event history   each event type's CAR path in every year, the average, a straight-line trend to the
                   next year with its prediction interval, and the model's flags on each event day.
   About           what the project is, and links to the docs, the dataset and the model.
@@ -35,13 +36,16 @@ reloader.refresh()   # a redeploy keeps old modules in memory; reload the projec
 from common.contracts import expand_events, load_retailers
 from common.settings import (DASHBOARD_URL, LINKS, LIVE_CACHE_DIR, LIVE_REPO, SNAPSHOT_DIR, STREAM_DIR,
                              STREAM_SUBDIRS)
-from common.study import ABNORMAL_RETURN_Z, ATTENTION_SPIKE_Z, ML_TEST_START_YEAR, STUDY_END_YEAR, STUDY_START_YEAR
+from common.study import (ABNORMAL_RETURN_Z, ATTENTION_SPIKE_Z, ESTIMATION_DAYS, ML_TEST_START_YEAR,
+                          STUDY_END_YEAR, STUDY_START_YEAR)
+
+MIN_HISTORY = ESTIMATION_DAYS
 
 # Chart colours: a validated colour-blind-safe set (blue, orange, aqua), plus greys for context.
 BLUE, ORANGE, AQUA, GREY = "#2a78d6", "#eb6834", "#1baf7a", "#8f8d86"
 LINK_NAMES = {"docs": "Docs: a tour of the whole codebase", "dataset": "Dataset", "model": "Model",
               "space": "Hugging Face Space", "huggingface": "Hugging Face organisation", "github": "GitHub organisation"}
-REPLAY = f"Replay {ML_TEST_START_YEAR}–{STUDY_END_YEAR}"      # the model's test years
+REPLAY = "Replay"
 VIEWS = ["Live stream", REPLAY, "Event history & forecast", "About"]
 
 
@@ -103,15 +107,18 @@ def snapshot(name: str) -> dict | None:
     return json.loads(path.read_text()) if path.exists() else None
 
 
-@st.cache_data(show_spinner=False)
 def replay_frames() -> dict | None:
-    """The recorded stream (hosting/snapshot/replay.json) as the tables the live view reads."""
+    """The recorded stream (hosting/snapshot/) as the tables the live view reads."""
+    path = SNAPSHOT_DIR / "replay.json"
+    return _replay_frames(path.stat().st_mtime) if path.exists() else None
+
+
+@st.cache_data(show_spinner=False)
+def _replay_frames(_built: float) -> dict:          # _built: read again when the recording changes
     r = snapshot("replay")
-    if r is None:
-        return None
     days = pd.to_datetime(pd.Series(r["days"]))
     tickers = pd.DataFrame(r["tickers"])
-    rows = pd.DataFrame(r["rows"])
+    rows = pd.read_parquet(SNAPSHOT_DIR / r["rows"])
     rows["date"] = days.iloc[rows["d"]].to_numpy()
     rows["ticker"] = tickers["ticker"].iloc[rows["t"]].to_numpy()
     signals = rows.rename(columns={"ab": "abnormal_return", "sp": "attention_spike"})[
@@ -171,8 +178,13 @@ def render_stream(signals: pd.DataFrame, cars: pd.DataFrame, preds: pd.DataFrame
                          column_config={"ar": "abnormal return", "z_views": "views z"})
     with right:
         st.subheader("Tomorrow's watchlist · big-move model")
-        if preds.empty:
-            st.caption("No model scores yet: train the model (src/ml/train.py), then restart the job.")
+        if preds.empty and signals["z_ar"].notna().any():
+            st.caption("No model scores in this run: the job started without a trained model. Train it "
+                       "(src/ml/train.py) or download it (see About), then restart the job.")
+        elif preds.empty:
+            st.caption(f"No scores yet: the model scores a retailer once its market model has "
+                       f"{MIN_HISTORY} trading days of history to compare with, so the first scores come "
+                       "about six months into a run.")
         else:
             preds = preds.merge(names, on="ticker", how="left")
             preds = preds[preds["retailer_type"].isin(kinds)]
@@ -242,7 +254,7 @@ def live_view():
         local_default = has_batches(STREAM_DIR)
         source = st.radio("Source", ["This computer", "Online live feed"], index=0 if local_default else 1,
                           help="This computer: the streaming job's output folder. Online live feed: what a job "
-                               "signed in to Hugging Face publishes automatically, which is what the hosted dashboard shows.")
+                               "started with --publish-live (scripts/demo_live.sh) publishes, which is what the hosted dashboard shows.")
         stream_dir = Path(st.text_input("Stream output folder", str(STREAM_DIR))) if source == "This computer" else None
         refresh = st.slider("Refresh every (seconds)", 2, 30, 5)
 
@@ -255,24 +267,26 @@ def live_view():
             current = live_feed()
             if current is None or "error" in current:
                 st.info("No live run is being published right now. To show one here, run the streaming job "
-                        "on a computer signed in to Hugging Face (see the About view), or watch the recorded stream in "
+                        "with `scripts/demo_live.sh` (see the About view), or watch the recorded stream in "
                         f"**{REPLAY}**." + (f"\n\n({current['error']})" if current else ""))
                 return
             from hosting.live import age_seconds, run_state
             age, state, n = age_seconds(current), run_state(current), current["batches"]
             ago = f"{age:.0f} s" if age < 120 else f"{age / 60:.0f} min" if age < 7200 else f"{age / 3600:.0f} h"
             feed = f"[{LIVE_REPO}](https://huggingface.co/datasets/{LIVE_REPO})"
+            reached = f", up to {pd.Timestamp(current['reached']):%d %b %Y}" if current.get("reached") else ""
             if state == "live":
                 st.success(f"**● Live now:** run {current['run_id']} by {current.get('by', 'a teammate')} is "
                            f"streaming; last update {ago} ago, "
-                           f"{n} micro-batches so far. This page refreshes every {refresh} s. ({feed})")
+                           f"{n} micro-batches so far{reached}. This page refreshes every {refresh} s. ({feed})")
             else:
-                why = ("it finished normally" if state == "finished" else
-                       "it stopped without finishing (stopped by hand, or the computer went offline)")
+                why = ("it reached the end of the data" if current.get("complete") else
+                       "it was stopped, and can be resumed" if state == "finished" else
+                       "it went quiet without finishing (stopped by force, or its computer went offline)")
                 st.warning(f"**No run is streaming right now.** Below is where the last run ended: run "
-                           f"{current['run_id']}, {n} micro-batches, {why} {ago} ago. To show a run live, start the "
-                           f"streaming job (see About); to watch the stream move now, open **{REPLAY}**. "
-                           f"({feed})")
+                           f"{current['run_id']}, {n} micro-batches{reached}; {why} {ago} ago. To show a run live, "
+                           f"start the cloud streamer or the streaming job (see About); to watch the stream move "
+                           f"now, open **{REPLAY}**. ({feed})")
             folder = current["folder"]
         signals = read_stream("stream_signals", folder)
         if signals.empty:
@@ -292,26 +306,39 @@ def replay_view():
         st.info("No recording yet: build it with `python3 src/hosting/snapshot.py` after a full run.")
         return
     lookback, kinds, focus = stream_controls()
-    days, start, last = frames["days"], frames["start"], len(frames["days"]) - 1
+    days = frames["days"]
+    years = sorted(days.dt.year.unique().tolist())
+    default = (ML_TEST_START_YEAR if ML_TEST_START_YEAR in years else years[0], years[-1])
     ss = st.session_state
-    ss.setdefault("replay_day", start)
-    ss.setdefault("playing", True)
+
+    top = st.columns([3, 2])
+    y0, y1 = top[0].select_slider("Years to replay", options=years, value=default,
+                                  help=f"By default {default[0]}–{default[1]}: the years the big-move model never "
+                                       "saw in training.")
+    speed = top[1].select_slider("Trading days per second", [1, 2, 5, 10, 20], value=5)
+    first = int(days.dt.year.searchsorted(y0, side="left"))          # first and last trading day of the range
+    last = int(days.dt.year.searchsorted(y1, side="right")) - 1
+    if ss.get("replay_range") != (y0, y1):                           # a new range plays from its start
+        ss.replay_range, ss.replay_day, ss.playing = (y0, y1), first, True
+    jump_key = f"jump_{y0}_{y1}"
 
     def jump():
-        ss.replay_day, ss.playing = ss.jump, False
+        ss.replay_day, ss.playing = ss[jump_key], False
 
-    c = st.columns([1.4, 2, 5])
+    c = st.columns([1.4, 6.6])
     if c[0].button("Pause" if ss.playing else "Play", use_container_width=True):
         ss.playing = not ss.playing
         if ss.playing and ss.replay_day >= last:
-            ss.replay_day = start
+            ss.replay_day = first
         st.rerun()
-    speed = c[1].select_slider("Trading days per second", [1, 2, 5, 10, 20], value=5)
-    c[2].select_slider("Jump to", options=list(range(start, last + 1)), value=ss.replay_day, key="jump",
+    c[1].select_slider("Jump to", options=list(range(first, last + 1)), value=ss.replay_day, key=jump_key,
                        format_func=lambda i: f"{days.iloc[i]:%d %b %Y}", on_change=jump)
-    st.caption(f"Recording: what the streaming job wrote for {days.iloc[start]:%d %b %Y} to {days.iloc[last]:%d %b %Y}, "
-               "the years the big-move model never saw in training, played back day by day. Not live market data; "
-               "for a live run see **Live stream**.")
+    st.caption(f"Recording: what the streaming job wrote for {days.iloc[first]:%d %b %Y} to {days.iloc[last]:%d %b %Y}, "
+               "played back day by day. Not live market data; for a live run see **Live stream**.")
+    if y0 < ML_TEST_START_YEAR:
+        st.warning(f"The big-move model was trained and tuned on the years before {ML_TEST_START_YEAR}, so its "
+                   f"scores for those years are not a fair test: it has already seen what happened. Judge the "
+                   f"model on {ML_TEST_START_YEAR} onwards.")
 
     @st.fragment(run_every=1.0)
     def tick():
@@ -320,8 +347,9 @@ def replay_view():
             if ss.replay_day >= last:
                 ss.playing = False
         d = ss.replay_day
-        render_stream(frames["signals"][frames["signals"]["d"] <= d], frames["cars"][frames["cars"]["close"] <= d],
-                      frames["preds"][frames["preds"]["d"] <= d], lookback, kinds, focus)
+        sig, cars, preds = frames["signals"], frames["cars"], frames["preds"]
+        render_stream(sig[sig["d"].between(first, d)], cars[cars["close"].between(first, d)],
+                      preds[preds["d"].between(first, d)], lookback, kinds, focus)
 
     tick()
 
@@ -420,23 +448,26 @@ def event_view():
             st.caption(f"Least-squares trend: {pct(tr['slope'])} a year (p = {tr['p']:.3f}). The bar is the {conf}% "
                        f"prediction interval for {F}.")
     with right:
-        st.subheader("What the big-move model expected")
+        st.subheader("Predicted vs actual big moves")
         m = g["model"]
+        predicted, actual = "Model predicted a big move", "Retailer actually had a big move"
         mdf = pd.DataFrame({"day": days * 2, "share": m["flagged"] + m["big_move"],
-                            "series": ["Flagged by the model"] * len(days) + ["Big move"] * len(days)})
+                            "series": [predicted] * len(days) + [actual] * len(days)})
         ref = pd.DataFrame({"share": [m["base_rate"]]})
         st.altair_chart(alt.layer(
             alt.Chart(mdf).mark_line(point=True).encode(
                 x=alt.X("day:Q", title="Trading days from the event", axis=alt.Axis(values=days, format="+d")),
                 y=alt.Y("share:Q", title="Share of retailers", axis=alt.Axis(format="%")),
-                color=legend_color(["Flagged by the model", "Big move"], [BLUE, ORANGE]),
+                color=legend_color([predicted, actual], [BLUE, ORANGE]),
                 tooltip=[alt.Tooltip("series:N"), alt.Tooltip("day:Q", format="+d"),
                          alt.Tooltip("share:Q", format=".1%")]),
             alt.Chart(ref).mark_rule(color=GREY, strokeDash=[2, 2]).encode(y="share:Q"),
         ).properties(height=300), use_container_width=True)
-        st.caption(f"Test years {ev_data['test_years'][0]}–{ev_data['test_years'][1]}, which the model never saw "
-                   f"({m['n'][0]} stock-days per event day). Grey line: big moves on an ordinary day "
-                   f"({m['base_rate']:.1%}). Shares, because the model's scores are not calibrated probabilities.")
+        st.caption(f"A **big move** is a day whose abnormal return is at least {ABNORMAL_RETURN_Z}× its usual "
+                   f"size. Blue: the share of retailers the big-move model flagged for that day (the day before). "
+                   f"Orange: the share that really had one. Test years {ev_data['test_years'][0]}–"
+                   f"{ev_data['test_years'][1]}, which the model never saw ({m['n'][0]} stock-days per event day). "
+                   f"Dotted line: big moves on an ordinary day ({m['base_rate']:.1%}).")
 
     st.subheader("How to read this")
     significant = [x["name"] for x in ev_data["event_types"]
@@ -468,16 +499,24 @@ Prime Day, Halloween, Chinese New Year), and whether Wikipedia attention moves w
 - **This dashboard** is the same app on a laptop and here. *Live stream* shows a real run as it happens;
   *{REPLAY}* plays the recorded stream; *Event history & forecast* shows each event over the years.
 
-**Show a live run here.** The streaming job publishes to this page by itself when its computer is signed in
-to Hugging Face with write access to the team's organisation (`hf auth login`). A test cannot take over: a new
-run only appears here once no other run is streaming. `--no-publish-live` keeps a run private.
+**Show a live run here.** Either way replays the stored data from mid-{ML_TEST_START_YEAR - 1} through the Spark job and publishes
+each micro-batch here:
+
+- **The cloud streamer, no computer needed** (team members): on GitHub, the [*Live stream* workflow]({LINKS["streamer"]})
+  → *Run workflow*, to start from a date or resume the last run. *Cancel run* stops it; it stops by itself when
+  the data runs out.
+- **From a laptop:** the command below sets Java 21 by itself, and needs `hf auth login` with write access to the
+  team's organisation. Ctrl-C stops it; `--resume` carries it on.
 
 ```bash
-python3 src/producers/replay_to_files.py
-python3 src/streaming/job.py --source files --fresh
+scripts/demo_live.sh
 ```
 
-This page opens on *Live stream* while a run is streaming. Each finished micro-batch appears within about 15 seconds.
+This page opens on *Live stream* while a run is streaming, and shows each micro-batch within about 15 seconds.
+A second run never takes over: it appears only once no other run is streaming.
+
+*"Live" means the processing is live (Kafka, Spark, the model and this page, as each micro-batch arrives); the
+data is a replay of {STUDY_START_YEAR}–{STUDY_END_YEAR}, the study period.*
 
 **Links:** {" · ".join(f"[{name}]({LINKS[k]})" for k, name in LINK_NAMES.items())} · hosted dashboard: {DASHBOARD_URL}
 

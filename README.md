@@ -6,5 +6,5 @@ redeploys it. Do not edit it here.
 
 - App: `src/dashboard/app.py` (the same file teammates run with `streamlit run src/dashboard/app.py`)
 - Recorded stream and event history: `hosting/snapshot/` (derived statistics only, no prices)
-- Live runs: the streaming job publishes them automatically when signed in to Hugging Face; the app reads them from there
+- Live runs: the streaming job publishes them with `--publish-live` (`scripts/demo_live.sh`, or the cloud streamer on GitHub Actions); the app reads them from Hugging Face
 - Docs: https://calendar-effects.mintlify.app

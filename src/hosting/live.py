@@ -1,29 +1,36 @@
 """The live feed (decision 0013): the streaming job publishes each micro-batch online, so the
 hosted dashboard shows a real run within seconds.
 
-A hosted dashboard cannot read a laptop's data/stream/ folder. So the streaming job uploads the
-micro-batches it has finished, every few seconds, to a public Hugging Face dataset
+A hosted dashboard cannot read a laptop's data/stream/ folder. So with --publish-live the streaming
+job uploads the micro-batches it has finished, every few seconds, to a public Hugging Face dataset
 (common.settings.LIVE_REPO), in the same batch_id=N folders it writes locally, and without the
 columns that would give back prices (NOT_PUBLISHED). The dashboard copies that folder into
 data/live/ and reads it exactly like a local run.
 
-It is automatic, with safeguards (publish_check, takes_over):
+It is opt-in (--publish-live), with safeguards (publish_check, takes_over):
   - it only starts when this computer is signed in to Hugging Face with write access to the
-    team's organisation, and the job writes to a local folder (not HDFS on the cluster);
-    otherwise the job prints one line and runs without it, never failing;
+    team's organisation and the job writes to a local folder (not HDFS on the cluster); if not,
+    the job stops at once and says why;
   - every run uploads into its own folder, and only becomes the run the dashboard shows when
-    no other run is streaming, so a teammate's test cannot take over a demo;
+    no other run is streaming, so a teammate's run cannot take over a demo;
   - each run says who ran it.
---no-publish-live keeps a run private; --publish-live insists (and fails if it cannot publish).
 
     hf auth login                                       (once, with a write token)
-    python3 src/producers/replay_to_files.py
-    python3 src/streaming/job.py --source files --fresh
+    scripts/demo_live.sh                                (replay + job --publish-live, Java 21 set)
+
+or, with no computer at all, the cloud streamer: the "Live stream" workflow of the team's
+live-stream repository on github.com runs the same script on GitHub's servers (decision 0015).
+
+A job restarted without --fresh carries on the same run: the run's identity is kept in the job's
+output folder (STATE), and batches finished but not yet uploaded when it stopped go up first.
+`python src/hosting/live.py finish OUT` marks a run finished when its job was killed before it
+could (the cloud streamer's clean-up step).
 
 The repository holds:
-    current.json        {"run_id", "by", "started_utc", "updated_utc", "batches", "finished"}: the run the
-                        dashboard shows; "batches" counts micro-batches with data, "finished" is true
-                        once the job stops
+    current.json        {"run_id", "by", "started_utc", "updated_utc", "batches", "reached", "finished",
+                        "complete"}: the run the dashboard shows; "batches" counts micro-batches with
+                        data, "reached" is the last trading day published, "finished" is true once the
+                        job stops, "complete" once it stopped because the replay ran out
     runs/<run_id>/<signals|event_car|predictions>/batch_id=N/part-0.parquet and _SUCCESS
 
 --publish-live needs --out to be a local folder (not HDFS), and a Hugging Face login.
@@ -31,6 +38,7 @@ The repository holds:
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from concurrent.futures import ThreadPoolExecutor
 import tempfile
@@ -47,6 +55,8 @@ from common.settings import LIVE_REPO, STREAM_SUBDIRS
 NOT_PUBLISHED = {"ret", "mkt_ret", "vol_ratio", "timestamp_utc"}
 CURRENT = "current.json"
 RUNS = "runs"
+STATE = "_live_run.json"     # in the job's output folder: the run it publishes, so a restart carries it on
+RUNNER_ENV = "CALENDAR_EFFECTS_RUNNER"   # who started the run, when git does not know (the cloud streamer)
 
 
 def public(df: pd.DataFrame) -> pd.DataFrame:
@@ -78,7 +88,10 @@ def takes_over(remote: dict | None, run_id: str) -> bool:
 
 
 def runner_name() -> str:
-    """The first name in this computer's git config, so the dashboard can say who is streaming."""
+    """Who is streaming, for the dashboard: $CALENDAR_EFFECTS_RUNNER, or the first name in this
+    computer's git config."""
+    if os.environ.get(RUNNER_ENV):
+        return os.environ[RUNNER_ENV]
     import subprocess
     name = subprocess.run(["git", "config", "user.name"], capture_output=True, text=True).stdout.strip()  # not-config: the git subcommand
     return name.split()[0] if name else "a teammate"
@@ -100,28 +113,58 @@ def stage_batch(out_dir: Path, batch_id: int, staging: Path, run_id: str) -> int
     return found
 
 
+def finished_batches(out_dir: Path) -> list[int]:
+    """The micro-batches in out_dir that Spark has finished writing (any output has _SUCCESS)."""
+    return sorted({int(p.parent.name.split("=")[1]) for sub in STREAM_SUBDIRS.values()
+                   for p in (Path(out_dir) / sub).glob("batch_id=*/_SUCCESS")})
+
+
+def load_state(out_dir: Path) -> dict | None:
+    path = Path(out_dir) / STATE
+    return json.loads(path.read_text()) if path.exists() else None
+
+
 class LivePublisher:
     """Uploads finished micro-batches every `every` seconds, in one commit each time, so a
     fast replay does not hit Hugging Face's limits. Upload errors are printed, not raised:
-    the streaming job keeps running, and the batches are tried again next time."""
+    the streaming job keeps running, and the batches are tried again next time.
 
-    def __init__(self, out_dir, repo_id: str = LIVE_REPO, every: float = 15.0):
+    resume=True carries on the run saved in out_dir (a job restarted without --fresh), uploading
+    first what it had finished but not published; otherwise it starts a new run."""
+
+    def __init__(self, out_dir, repo_id: str = LIVE_REPO, every: float = 15.0, resume: bool = False,
+                 background: bool = True):
         from huggingface_hub import HfApi
 
         self.api, self.repo_id, self.out_dir, self.every = HfApi(), repo_id, Path(out_dir), every
         self.api.create_repo(repo_id, repo_type="dataset", exist_ok=True)
-        self.run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        self.started = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        self.by = runner_name()
+        saved = load_state(self.out_dir) if resume else None
+        if saved:
+            self.run_id, self.started, self.by = saved["run_id"], saved["started_utc"], saved["by"]
+            self.published, self.last_batch, self.reached = saved["published"], saved["last_batch"], saved["reached"]
+            self.complete = saved.get("complete", False)
+        else:
+            self.run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            self.started = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            self.by = runner_name()
+            self.published, self.last_batch, self.reached, self.complete = 0, -1, None, False
         self.waiting_for = None             # another run that is streaming, which this one waits behind
-        self.pending: list[int] = []
-        self.published = 0
+        self.pending = [b for b in finished_batches(self.out_dir) if b > self.last_batch] if saved else []
         self.lock = threading.Lock()
         self.stop = threading.Event()
-        self.push(force=True)                    # current.json first, so the dashboard switches to this run
-        self.thread = threading.Thread(target=self.loop, daemon=True)
-        self.thread.start()
-        print(f"live feed: run {self.run_id} by {self.by} -> https://huggingface.co/datasets/{repo_id}")
+        self.thread = None
+        if background:
+            self.push(force=True)                # current.json first, so the dashboard switches to this run
+            self.thread = threading.Thread(target=self.loop, daemon=True)
+            self.thread.start()
+            print(f"live feed: {'carrying on' if saved else 'new'} run {self.run_id} by {self.by} "
+                  f"({self.published} micro-batches so far) -> https://huggingface.co/datasets/{repo_id}")
+
+    def save(self, finished: bool):
+        (self.out_dir / STATE).write_text(json.dumps({
+            "run_id": self.run_id, "by": self.by, "started_utc": self.started, "published": self.published,
+            "last_batch": self.last_batch, "reached": self.reached, "finished": finished,
+            "complete": self.complete}))
 
     def current(self) -> dict | None:
         """The run the dashboard shows now (current.json), or None if there is none."""
@@ -149,6 +192,9 @@ class LivePublisher:
         staging = Path(tempfile.mkdtemp(prefix="calendar-effects-live-"))
         try:
             with_data = sum(stage_batch(self.out_dir, b, staging, self.run_id) > 0 for b in batches)
+            staged = staging / RUNS / self.run_id / STREAM_SUBDIRS["stream_signals"]
+            dates = pd.read_parquet(staged, columns=["date"])["date"].dropna() if staged.exists() else []
+            reached = max([str(pd.Timestamp(d).date()) for d in dates] + [self.reached or ""]) or None
             remote = self.current()
             if takes_over(remote, self.run_id):
                 if self.waiting_for:
@@ -157,7 +203,8 @@ class LivePublisher:
                 (staging / CURRENT).write_text(json.dumps({
                     "run_id": self.run_id, "by": self.by, "started_utc": self.started,
                     "updated_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                    "batches": self.published + with_data, "finished": finished}))
+                    "batches": self.published + with_data, "reached": reached, "finished": finished,
+                    "complete": self.complete and finished}))
             elif self.waiting_for != remote["run_id"]:
                 self.waiting_for = remote["run_id"]
                 print(f"live feed: run {remote['run_id']} by {remote.get('by', 'a teammate')} is streaming now; "
@@ -166,6 +213,8 @@ class LivePublisher:
                                    commit_message=f"live run {self.run_id}: {with_data} micro-batches"
                                                   + (" (finished)" if finished else ""))
             self.published += with_data
+            self.last_batch, self.reached = max(batches + [self.last_batch]), reached
+            self.save(finished)
             if with_data:
                 print(f"live feed: published {with_data} micro-batches ({self.published} in this run)")
         except Exception as e:                   # keep streaming; try these batches again next time
@@ -175,11 +224,24 @@ class LivePublisher:
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 
-    def close(self):
-        """Publish what is left and mark the run finished (the job stopped normally)."""
+    def close(self, complete: bool = False):
+        """Publish what is left and mark the run finished: complete when the replay ran out,
+        otherwise stopped (it can carry on later)."""
         self.stop.set()
-        self.thread.join()
+        if self.thread is not None:
+            self.thread.join()
+        self.complete = complete
         self.push(force=True, finished=True)
+
+
+def finish(out_dir: Path, repo_id: str = LIVE_REPO) -> str:
+    """Mark the run in out_dir finished, after uploading what it had left, when its job was killed
+    before it could do so itself (the cloud streamer's clean-up step). Does nothing otherwise."""
+    saved = load_state(out_dir)
+    if saved is None or saved.get("finished"):
+        return "live feed: nothing to finish"
+    LivePublisher(out_dir, repo_id, resume=True, background=False).close()
+    return f"live feed: run {saved['run_id']} marked finished"
 
 
 def mirror(cache_dir: Path, repo_id: str = LIVE_REPO) -> dict | None:
@@ -230,3 +292,11 @@ def run_state(current: dict | None) -> str:
     if current.get("finished"):
         return "finished"
     return "live" if age_seconds(current) < QUIET_SECONDS else "stopped"
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="the live feed's command-line helpers")
+    parser.add_argument("command", choices=["finish"])
+    parser.add_argument("out", help="the streaming job's output folder")
+    print(finish(Path(parser.parse_args().out)))

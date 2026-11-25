@@ -63,6 +63,10 @@ DOCS_URL = "https://calendar-effects.mintlify.app"
 DASHBOARD_URL = os.environ.get("CALENDAR_EFFECTS_DASHBOARD_URL", "https://calendar-effects.streamlit.app")
 LIVE_REPO = os.environ.get("CALENDAR_EFFECTS_LIVE_REPO", f"{HF_OWNER}/{HF_REPOS['live']}")
 LIVE_CACHE_DIR = DATA_DIR / "live"           # the dashboard's local copy of the live feed
+# The cloud streamer (decision 0015): a private github.com repository whose "Live stream" workflow
+# runs scripts/demo_live.sh on GitHub's servers, so a live run needs no team member's computer.
+STREAMER_REPO = f"{GITHUB_ORG}/live-stream"
+STREAMER_URL = f"https://github.com/{STREAMER_REPO}/actions/workflows/live-stream.yml"
 LINKS = {                                    # where everything is, for pages and cards
     "docs": DOCS_URL,
     "dashboard": DASHBOARD_URL,
@@ -71,6 +75,7 @@ LINKS = {                                    # where everything is, for pages an
     "space": f"https://huggingface.co/spaces/{HF_OWNER}/{HF_REPOS['space']}",
     "huggingface": f"https://huggingface.co/{HF_OWNER}",
     "github": f"https://github.com/{GITHUB_ORG}",
+    "streamer": STREAMER_URL,
 }
 
 
