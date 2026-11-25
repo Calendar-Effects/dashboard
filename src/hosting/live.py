@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 import tempfile
 import threading
 import time
@@ -122,8 +123,8 @@ def mirror(cache_dir: Path, repo_id: str = LIVE_REPO) -> dict | None:
     """Copy the current live run into cache_dir/runs/<run_id>/, downloading only new files.
 
     Returns current.json plus "folder" (the local copy, laid out like data/stream/), or None
-    when no run has been published yet. Each batch's _SUCCESS is fetched after its data, so a
-    reader never sees half a batch.
+    when no run has been published yet. New files are fetched in parallel, and every _SUCCESS
+    marker only after all the data, so a reader never sees half a batch.
     """
     from huggingface_hub import HfApi, hf_hub_download
     from huggingface_hub.errors import EntryNotFoundError, RepositoryNotFoundError
@@ -136,10 +137,15 @@ def mirror(cache_dir: Path, repo_id: str = LIVE_REPO) -> dict | None:
         return None
     run = f"{RUNS}/{current['run_id']}"
     files = [f.path for f in api.list_repo_tree(repo_id, path_in_repo=run, recursive=True, repo_type="dataset")
-             if getattr(f, "size", None) is not None]
-    for path in sorted(files, key=lambda p: (p.rsplit("/", 1)[0], p.endswith("_SUCCESS"))):
-        if not (Path(cache_dir) / path).exists():
-            hf_hub_download(repo_id, path, repo_type="dataset", local_dir=cache_dir)
+             if getattr(f, "size", None) is not None and not (Path(cache_dir) / f.path).exists()]
+
+    def fetch(path):
+        hf_hub_download(repo_id, path, repo_type="dataset", local_dir=cache_dir)
+
+    # Many small files: fetch them in parallel, all the data first and the _SUCCESS markers after.
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        for done_marker in (False, True):
+            list(pool.map(fetch, [f for f in files if f.endswith("_SUCCESS") == done_marker]))
     return {**current, "folder": Path(cache_dir) / run}
 
 
