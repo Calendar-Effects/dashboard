@@ -1,0 +1,68 @@
+# Keeps the hosted dashboard current without anyone's computer (decision 0015): every 30 minutes it
+# copies the app from the team repository's main branch on github.sfu.ca (scripts/sync_dashboard_app.sh
+# --into) and pushes if anything changed; Streamlit Community Cloud then redeploys. The post-commit
+# hook still pushes at once from computers that have it set up.
+#
+# Needs the repository secret SFU_GITHUB_TOKEN (Settings > Secrets and variables > Actions); without
+# it, every run is skipped with a note. The copy that counts is hosting/workflows/sync-dashboard.yml
+# in the team repository; scripts/install_workflows.sh puts it here.
+name: Sync from the team repository
+
+on:
+  schedule:
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check the secret
+        id: check
+        env:
+          SFU_TOKEN: ${{ secrets.SFU_GITHUB_TOKEN }}
+        run: |
+          if [ -z "$SFU_TOKEN" ]; then
+            echo "::notice::Add the SFU_GITHUB_TOKEN repository secret to sync without a laptop."
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Get this repository
+        if: steps.check.outputs.skip != '1'
+        uses: actions/checkout@v7
+        with:
+          path: site
+
+      - name: Get the project from github.sfu.ca
+        if: steps.check.outputs.skip != '1'
+        uses: actions/checkout@v7
+        with:
+          github-server-url: https://github.sfu.ca
+          repository: aba395/Calendar-Effects
+          ref: main
+          token: ${{ secrets.SFU_GITHUB_TOKEN }}
+          persist-credentials: false
+          path: project
+
+      - name: Copy the app, and push if it changed
+        if: steps.check.outputs.skip != '1'
+        run: |
+          project/scripts/sync_dashboard_app.sh --into "$PWD/site"
+          cd site
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Already up to date."
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "Sync dashboard from $(git -C ../project rev-parse --short HEAD) (scheduled)"
+          git push -q origin HEAD:main
+          echo "Pushed; Streamlit Community Cloud redeploys in a minute or two."
