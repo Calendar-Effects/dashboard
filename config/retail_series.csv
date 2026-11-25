@@ -1,0 +1,7 @@
+series_id,category,notes
+RSXFS,all_retail,All retail (excluding food services)
+RSNSR,nonstore_online,"Nonstore retailers, mostly online"
+RSGMS,general_merchandise,"General merchandise stores, e.g. Walmart, Target, Costco"
+RSEAS,electronics,"Electronics and appliance stores, e.g. Best Buy"
+RSBMGESD,building_garden,"Building materials and garden, e.g. Home Depot"
+RSCCAS,clothing,"Clothing stores, e.g. Macy's"

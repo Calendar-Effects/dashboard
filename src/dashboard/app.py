@@ -1,0 +1,483 @@
+"""Calendar Effects dashboard (decisions 0008 and 0013): one Streamlit app, on a laptop and hosted.
+
+On a laptop, next to the streaming job:    streamlit run src/dashboard/app.py
+Hosted (free, Streamlit Community Cloud):   common.settings.DASHBOARD_URL, also embedded in the
+                                            Hugging Face Space. scripts/sync_dashboard_app.sh deploys it.
+
+Four views:
+  Live stream     the streaming job's output as it is written: today's alerts, tomorrow's watchlist
+                  from the big-move model, event CARs as windows close, alerts per day, one retailer.
+                  Source: this computer's data/stream/ folder, or the online live feed that the job
+                  publishes with --publish-live (src/hosting/live.py), which is what the hosted app shows.
+  Replay          the same view over the recorded 2024-2025 stream (the model's test years), played
+                  day by day from hosting/snapshot/replay.json (src/hosting/snapshot.py).
+  Event history   each event type's CAR path in every year, the average, a straight-line trend to the
+                  next year with its prediction interval, and the model's flags on each event day.
+  About           what the project is, and links to the docs, the dataset and the model.
+
+Only micro-batch folders Spark has finished (they hold a _SUCCESS file) are read, so a half-written
+batch never shows up, and each finished folder is read once and cached.
+"""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+import altair as alt
+import pandas as pd
+import streamlit as st
+
+from common.contracts import expand_events, load_retailers
+from common.settings import (DASHBOARD_URL, LINKS, LIVE_CACHE_DIR, LIVE_REPO, SNAPSHOT_DIR, STREAM_DIR,
+                             STREAM_SUBDIRS)
+from common.study import ABNORMAL_RETURN_Z, ATTENTION_SPIKE_Z, ML_TEST_START_YEAR, STUDY_END_YEAR, STUDY_START_YEAR
+
+# Chart colours: a validated colour-blind-safe set (blue, orange, aqua), plus greys for context.
+BLUE, ORANGE, AQUA, GREY = "#2a78d6", "#eb6834", "#1baf7a", "#8f8d86"
+LINK_NAMES = {"docs": "Docs: a tour of the whole codebase", "dataset": "Dataset", "model": "Model",
+              "space": "Hugging Face Space", "huggingface": "Hugging Face organisation", "github": "GitHub organisation"}
+REPLAY = f"Replay {ML_TEST_START_YEAR}–{STUDY_END_YEAR}"      # the model's test years
+VIEWS = ["Live stream", REPLAY, "Event history & forecast", "About"]
+
+
+# ---------------------------------------------------------------- reading the stream
+
+@st.cache_data(show_spinner=False)
+def read_batch(folder: str) -> pd.DataFrame:
+    """One finished micro-batch folder (cached: a finished batch never changes)."""
+    return pd.read_parquet(folder)
+
+
+def read_stream(dataset: str, stream_dir: Path) -> pd.DataFrame:
+    """Every finished micro-batch of one streaming output, in batch order."""
+    folder = Path(stream_dir) / STREAM_SUBDIRS[dataset]
+    done = sorted((p for p in folder.glob("batch_id=*") if (p / "_SUCCESS").exists()),
+                  key=lambda p: int(p.name.split("=")[1]))
+    if not done:
+        return pd.DataFrame()
+    df = pd.concat([read_batch(str(p)) for p in done], ignore_index=True)
+    for col in ("date", "day0_date", "event_date"):
+        if col in df:
+            df[col] = pd.to_datetime(df[col])
+    df.attrs["batches"] = len(done)
+    return df
+
+
+def has_batches(stream_dir: Path) -> bool:
+    return any((Path(stream_dir) / STREAM_SUBDIRS["stream_signals"]).glob("batch_id=*/_SUCCESS"))
+
+
+@st.cache_data(ttl=4, show_spinner=False)
+def live_feed() -> dict | None:
+    """The online live feed, copied to data/live/ (shared by every viewer, refreshed every 4 s).
+    CALENDAR_EFFECTS_OFFLINE=1 turns it off (the tests use it)."""
+    if os.environ.get("CALENDAR_EFFECTS_OFFLINE"):
+        return None
+    from hosting.live import mirror
+    try:
+        return mirror(LIVE_CACHE_DIR)
+    except Exception as e:                       # offline, or Hugging Face is busy
+        return {"error": str(e)}
+
+
+@st.cache_data(show_spinner=False)
+def retailers() -> pd.DataFrame:
+    return pd.DataFrame(load_retailers())[["ticker", "company", "retailer_type"]]
+
+
+@st.cache_data(show_spinner=False)
+def calendar() -> pd.DataFrame:
+    events = pd.DataFrame(expand_events(STUDY_START_YEAR, STUDY_END_YEAR))
+    events["event_date"] = pd.to_datetime(events["event_date"])
+    return events[["event_type", "event_date"]].drop_duplicates().sort_values("event_date")
+
+
+@st.cache_data(show_spinner=False)
+def snapshot(name: str) -> dict | None:
+    path = SNAPSHOT_DIR / f"{name}.json"
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+@st.cache_data(show_spinner=False)
+def replay_frames() -> dict | None:
+    """The recorded stream (hosting/snapshot/replay.json) as the tables the live view reads."""
+    r = snapshot("replay")
+    if r is None:
+        return None
+    days = pd.to_datetime(pd.Series(r["days"]))
+    tickers = pd.DataFrame(r["tickers"])
+    rows = pd.DataFrame(r["rows"])
+    rows["date"] = days.iloc[rows["d"]].to_numpy()
+    rows["ticker"] = tickers["ticker"].iloc[rows["t"]].to_numpy()
+    signals = rows.rename(columns={"ab": "abnormal_return", "sp": "attention_spike"})[
+        ["d", "ticker", "date", "ar", "z_ar", "abnormal_return", "views", "z_views", "attention_spike"]]
+    preds = rows.dropna(subset=["p"]).rename(columns={"p": "p_big_move_next", "alert": "big_move_alert"})[
+        ["d", "ticker", "date", "p_big_move_next", "big_move_alert"]]
+    cars = pd.DataFrame(r["windows"]).rename(columns={"event": "event_type", "n_ab": "n_abnormal_days",
+                                                      "n_sp": "n_spike_days"})
+    cars["ticker"] = tickers["ticker"].iloc[cars["t"]].to_numpy()
+    cars["day0_date"] = pd.to_datetime(cars["day0"])
+    return {"days": days, "start": r["start"], "signals": signals, "preds": preds, "cars": cars}
+
+
+def pct(x, digits: int = 2) -> str:
+    return "" if pd.isna(x) else f"{x:+.{digits}%}"
+
+
+# ---------------------------------------------------------------- the stream view (live and replay)
+
+def render_stream(signals: pd.DataFrame, cars: pd.DataFrame, preds: pd.DataFrame, lookback: int,
+                  kinds: list[str], focus: str | None, batches: int | None = None):
+    """Today's picture of the stream: everything up to the latest day in `signals`."""
+    names = retailers()
+    signals = signals.merge(names, on="ticker", how="left")
+    signals = signals[signals["retailer_type"].isin(kinds)]
+    if signals.empty:
+        st.info("No rows for this retailer type yet.")
+        return
+    today = signals["date"].max()
+    on_today = signals[signals["date"] == today]
+    alerts_today = on_today[(on_today["abnormal_return"] == 1) | (on_today["attention_spike"] == 1)]
+
+    c = st.columns(3) + st.columns(3)
+    c[0].metric("Stream has reached", today.strftime("%d %b %Y"), today.strftime("%A"), delta_color="off")
+    c[1].metric("Micro-batches" if batches is not None else "Trading days",
+                batches if batches is not None else signals["date"].nunique())
+    c[2].metric("Stock-days processed", f"{len(signals):,}")
+    c[3].metric("Abnormal returns today", int((on_today["abnormal_return"] == 1).sum()))
+    c[4].metric("Attention spikes today", int((on_today["attention_spike"] == 1).sum()))
+    c[5].metric("Event windows closed", 0 if cars.empty else len(cars))
+
+    left, right = st.columns(2)
+    with left:
+        st.subheader(f"Today's alerts · {today:%a %d %b %Y}")
+        st.caption(f"Abnormal return: |move the market model did not expect| ≥ {ABNORMAL_RETURN_Z}× its usual "
+                   f"size. Attention spike: Wikipedia views ≥ {ATTENTION_SPIKE_Z} sd above their recent level.")
+        if alerts_today.empty:
+            st.caption("No abnormal return or attention spike today.")
+        else:
+            show = alerts_today.assign(
+                alert=alerts_today.apply(lambda r: "both" if r["abnormal_return"] == 1 and r["attention_spike"] == 1
+                                         else "abnormal return" if r["abnormal_return"] == 1 else "attention spike",
+                                         axis=1),
+                ar=alerts_today["ar"].map(pct))
+            st.dataframe(show[["ticker", "company", "alert", "ar", "z_ar", "views", "z_views"]]
+                         .sort_values("z_ar", key=abs, ascending=False).round(2), hide_index=True,
+                         column_config={"ar": "abnormal return", "z_views": "views z"})
+    with right:
+        st.subheader("Tomorrow's watchlist · big-move model")
+        if preds.empty:
+            st.caption("No model scores yet: train the model (src/ml/train.py), then restart the job.")
+        else:
+            preds = preds.merge(names, on="ticker", how="left")
+            preds = preds[preds["retailer_type"].isin(kinds)]
+            last_day = preds["date"].max()
+            latest = preds[preds["date"] == last_day].sort_values("p_big_move_next", ascending=False)
+            st.caption(f"Scored on {last_day:%d %b %Y} for the next trading day: {int(latest['big_move_alert'].sum())} "
+                       f"of {len(latest)} retailers flagged (top 5% of scores). The five most likely big movers:")
+            st.dataframe(latest.head(5).assign(flagged=latest["big_move_alert"].map({1: "⚑ yes", 0: ""}))
+                         [["ticker", "company", "retailer_type", "p_big_move_next", "flagged"]].round(3),
+                         hide_index=True, column_config={"p_big_move_next": "score"})
+            outcome = (signals.sort_values(["ticker", "date"])
+                       .assign(next_big=lambda d: d.groupby("ticker")["abnormal_return"].shift(-1))
+                       [["ticker", "date", "next_big"]])
+            known = preds[preds["date"] < today].merge(outcome, on=["ticker", "date"]).dropna(subset=["next_big"])
+            flagged, quiet = known[known["big_move_alert"] == 1], known[known["big_move_alert"] == 0]
+            if len(flagged) and len(quiet) and quiet["next_big"].mean() > 0:
+                st.caption(f"So far: {flagged['next_big'].mean():.0%} of {len(flagged):,} flagged stock-days were big "
+                           f"moves the next day, against {quiet['next_big'].mean():.1%} of the {len(quiet):,} not flagged "
+                           f"({flagged['next_big'].mean() / quiet['next_big'].mean():.1f}× as often).")
+
+    st.subheader("Event windows as they close")
+    if cars.empty:
+        st.caption("No event window has closed yet.")
+    else:
+        recent = cars.merge(names, on="ticker", how="left")
+        recent = recent[recent["retailer_type"].isin(kinds)].sort_values(["day0_date", "ticker"],
+                                                                         ascending=[False, True]).head(20)
+        recent = recent.assign(CAR=recent["car"].map(pct), day0_date=recent["day0_date"].dt.date,
+                               significant=(recent["car_z"].abs() >= ABNORMAL_RETURN_Z).map({True: "yes", False: ""}))
+        st.dataframe(recent[["day0_date", "event_type", "ticker", "company", "CAR", "car_z", "significant",
+                             "n_abnormal_days", "n_spike_days"]].round(2), hide_index=True)
+        upcoming = calendar()[calendar()["event_date"] > today].head(3)
+        if not upcoming.empty:
+            st.caption("Next events: " + ", ".join(f"{r.event_type} {r.event_date:%Y-%m-%d}"
+                                                   for r in upcoming.itertuples()))
+
+    st.subheader(f"Alerts per trading day · last {lookback} trading days")
+    days = sorted(signals["date"].unique())[-lookback:]
+    window = signals[signals["date"].isin(days)]
+    per_day = window.groupby("date")[["abnormal_return", "attention_spike"]].sum()
+    st.line_chart(per_day.rename(columns={"abnormal_return": "abnormal returns",
+                                          "attention_spike": "attention spikes"}), color=[BLUE, ORANGE])
+
+    if focus:
+        st.subheader(f"{focus} · cumulative abnormal return and attention")
+        one = window[window["ticker"] == focus].set_index("date").sort_index()
+        if one.empty:
+            st.caption("No rows for this retailer in the window yet.")
+        else:
+            a, b = st.columns(2)
+            a.line_chart(one["ar"].fillna(0).cumsum().rename("cumulative abnormal return"), color=BLUE)
+            b.line_chart(one["z_views"].rename("attention z-score"), color=BLUE)
+
+
+def stream_controls():
+    with st.sidebar:
+        st.header("Stream view")
+        lookback = st.slider("Trading days in the charts", 20, 250, 60)
+        kinds = st.multiselect("Retailer type", ["online", "store"], default=["online", "store"]) or ["online", "store"]
+        focus = st.selectbox("Retailer to follow", [""] + sorted(retailers()["ticker"])) or None
+    return lookback, kinds, focus
+
+
+def live_view():
+    lookback, kinds, focus = stream_controls()
+    with st.sidebar:
+        local_default = has_batches(STREAM_DIR)
+        source = st.radio("Source", ["This computer", "Online live feed"], index=0 if local_default else 1,
+                          help="This computer: the streaming job's output folder. Online live feed: what a job "
+                               "started with --publish-live publishes, which is what the hosted dashboard shows.")
+        stream_dir = Path(st.text_input("Stream output folder", str(STREAM_DIR))) if source == "This computer" else None
+        refresh = st.slider("Refresh every (seconds)", 2, 30, 5)
+
+    @st.fragment(run_every=refresh)
+    def tick():
+        if stream_dir is not None:
+            folder = stream_dir
+            st.caption(f"Reading {folder}")
+        else:
+            current = live_feed()
+            if current is None or "error" in current:
+                st.info("No live run is being published right now. To show one here, run the streaming job "
+                        "with `--publish-live` (see the About view), or watch the recorded stream in "
+                        f"**{REPLAY}**." + (f"\n\n({current['error']})" if current else ""))
+                return
+            from hosting.live import age_seconds
+            age = age_seconds(current)
+            state = "live now" if age < 120 else f"last update {age / 60:.0f} min ago"
+            st.caption(f"Online live feed · run {current['run_id']} · {state} · {current['batches']} micro-batches "
+                       f"published · [{LIVE_REPO}](https://huggingface.co/datasets/{LIVE_REPO})")
+            folder = current["folder"]
+        signals = read_stream("stream_signals", folder)
+        if signals.empty:
+            st.info("No streaming output yet. Start the replay and the job, for example:\n\n"
+                    "`python3 src/producers/replay_to_files.py` then "
+                    "`python3 src/streaming/job.py --source files --fresh`")
+            return
+        render_stream(signals, read_stream("stream_event_car", folder), read_stream("stream_predictions", folder),
+                      lookback, kinds, focus, batches=signals.attrs["batches"])
+
+    tick()
+
+
+def replay_view():
+    frames = replay_frames()
+    if frames is None:
+        st.info("No recording yet: build it with `python3 src/hosting/snapshot.py` after a full run.")
+        return
+    lookback, kinds, focus = stream_controls()
+    days, start, last = frames["days"], frames["start"], len(frames["days"]) - 1
+    ss = st.session_state
+    ss.setdefault("replay_day", start)
+    ss.setdefault("playing", True)
+
+    def jump():
+        ss.replay_day, ss.playing = ss.jump, False
+
+    c = st.columns([1.4, 2, 5])
+    if c[0].button("Pause" if ss.playing else "Play", use_container_width=True):
+        ss.playing = not ss.playing
+        if ss.playing and ss.replay_day >= last:
+            ss.replay_day = start
+        st.rerun()
+    speed = c[1].select_slider("Trading days per second", [1, 2, 5, 10, 20], value=5)
+    c[2].select_slider("Jump to", options=list(range(start, last + 1)), value=ss.replay_day, key="jump",
+                       format_func=lambda i: f"{days.iloc[i]:%d %b %Y}", on_change=jump)
+    st.caption(f"Recording: what the streaming job wrote for {days.iloc[start]:%d %b %Y} to {days.iloc[last]:%d %b %Y}, "
+               "the years the big-move model never saw in training, played back day by day. Not live market data; "
+               "for a live run see **Live stream**.")
+
+    @st.fragment(run_every=1.0)
+    def tick():
+        if ss.playing:
+            ss.replay_day = min(last, ss.replay_day + speed)
+            if ss.replay_day >= last:
+                ss.playing = False
+        d = ss.replay_day
+        render_stream(frames["signals"][frames["signals"]["d"] <= d], frames["cars"][frames["cars"]["close"] <= d],
+                      frames["preds"][frames["preds"]["d"] <= d], lookback, kinds, focus)
+
+    tick()
+
+
+# ---------------------------------------------------------------- event history and forecast
+
+def legend_color(domain: list[str], colors: list[str]):
+    return alt.Color("series:N", scale=alt.Scale(domain=domain, range=colors),
+                     legend=alt.Legend(orient="top", title=None, symbolType="stroke", symbolStrokeWidth=3,
+                                       symbolOpacity=1))
+
+
+def event_view():
+    ev_data = snapshot("events")
+    if ev_data is None:
+        st.info("No event history yet: build it with `python3 src/hosting/snapshot.py` after a full run.")
+        return
+    events = {e["name"]: e for e in ev_data["event_types"]}
+    days, F, conf = ev_data["days"], ev_data["forecast_year"], round(ev_data["confidence"] * 100)
+    c = st.columns([3, 2, 2])
+    name = c[0].selectbox("Event", list(events))
+    group = c[1].radio("Retailers", ev_data["groups"], horizontal=True, format_func=str.capitalize)
+    years_all = list(range(ev_data["first_year"], ev_data["last_year"] + 1))
+    highlight = c[2].selectbox("Highlight year", ["none"] + years_all[::-1], index=1)
+    e, g = events[name], events[name]["groups"][group]
+    s, tr = g["summary"], g["trend"]
+    fc_mid, fc_lo, fc_hi = g["forecast"]["mid"][-1], g["forecast"]["lo"][-1], g["forecast"]["hi"][-1]
+
+    k = st.columns(4)
+    if s:
+        k[0].metric(f"Average CAR, {ev_data['first_year']}–{ev_data['last_year']}", pct(s["mean_car"], 1),
+                    f"{conf}% CI {pct(s['ci_low'], 1)} to {pct(s['ci_high'], 1)} · p = {s['p_clustered']:.3f}",
+                    delta_color="off")
+    if tr:
+        k[1].metric("Change per year", pct(tr["slope"]), f"p = {tr['p']:.3f}", delta_color="off")
+    k[2].metric(f"{F} forecast", pct(fc_mid, 1), f"{conf}% interval {pct(fc_lo, 1)} to {pct(fc_hi, 1)}",
+                delta_color="off")
+    k[3].metric(f"Next {name}", e["next_date"] or "not listed yet")
+    if e["also"]:
+        st.caption(f"Markets close on {' and '.join(e['also'])}, so it shares this event's window.")
+
+    st.subheader(f"{name} · cumulative abnormal return, day {days[0]} to +{days[-1]}")
+    rows = [{"series": "Each year", "year": str(y), "day": d, "car": v}
+            for y, path in zip(g["years"], g["paths"]) for d, v in zip(days, path) if v is not None]
+    df = pd.DataFrame(rows)
+    hl = df[df["year"] == str(highlight)].assign(series=str(highlight))
+    mean = pd.DataFrame({"series": "Average", "day": days, "car": g["mean"]})
+    fc = pd.DataFrame({"series": f"{F} forecast", "day": days, "car": g["forecast"]["mid"],
+                       "lo": g["forecast"]["lo"], "hi": g["forecast"]["hi"]})
+    domain = ["Each year"] + ([str(highlight)] if not hl.empty else []) + ["Average", f"{F} forecast"]
+    colors = [GREY] + ([AQUA] if not hl.empty else []) + [BLUE, ORANGE]
+    color = legend_color(domain, colors)
+    x = alt.X("day:Q", title="Trading days from the event", axis=alt.Axis(values=days, format="+d"))
+    y = alt.Y("car:Q", title="Cumulative abnormal return", axis=alt.Axis(format="%"))
+    tip = [alt.Tooltip("series:N"), alt.Tooltip("day:Q", format="+d"), alt.Tooltip("car:Q", format="+.2%")]
+    chart = alt.layer(
+        alt.Chart(df).mark_line(strokeWidth=1.25, opacity=0.55).encode(x=x, y=y, detail="year:N", color=color,
+                                                                       tooltip=tip + [alt.Tooltip("year:N")]),
+        alt.Chart(fc).mark_area(opacity=0.12).encode(x=x, y="lo:Q", y2="hi:Q", color=color),
+        alt.Chart(hl).mark_line(strokeWidth=2.5).encode(x=x, y=y, color=color, tooltip=tip),
+        alt.Chart(mean).mark_line(strokeWidth=2.5, point=True).encode(x=x, y=y, color=color, tooltip=tip),
+        alt.Chart(fc).mark_line(strokeWidth=2.5, strokeDash=[6, 4]).encode(
+            x=x, y=y, color=color, tooltip=tip + [alt.Tooltip("lo:Q", format="+.2%", title=f"{conf}% low"),
+                                                  alt.Tooltip("hi:Q", format="+.2%", title=f"{conf}% high")]),
+        alt.Chart(pd.DataFrame({"day": [0]})).mark_rule(color=GREY, strokeWidth=1).encode(x=x),
+    ).properties(height=360)
+    st.altair_chart(chart, use_container_width=True)
+    st.caption(f"Grey: one line per year, averaged over the {group} retailers. Blue: the average of those years. "
+               f"Orange, dashed: a straight-line trend through the years, extended to {F}, with its {conf}% "
+               "prediction interval (where one new year's value should fall).")
+
+    left, right = st.columns(2)
+    with left:
+        st.subheader("Each year's CAR and the trend")
+        last_i = len(days) - 1
+        yearly = pd.DataFrame({"year": g["years"], "car": [p[last_i] for p in g["paths"]], "series": "CAR that year"})
+        parts = [alt.Chart(yearly).mark_point(filled=True, size=70).encode(
+            x=alt.X("year:O", title=None), y=alt.Y("car:Q", title="CAR", axis=alt.Axis(format="%")),
+            color=legend_color(["CAR that year", "Trend", f"{F} forecast"], [BLUE, ORANGE, ORANGE]),
+            tooltip=[alt.Tooltip("year:O"), alt.Tooltip("car:Q", format="+.2%")])]
+        if tr:
+            line = pd.DataFrame({"year": g["years"] + [F]})
+            line["car"] = tr["intercept"] + tr["slope"] * line["year"]
+            line["series"] = "Trend"
+            point = pd.DataFrame({"year": [F], "car": [fc_mid], "lo": [fc_lo], "hi": [fc_hi], "series": [f"{F} forecast"]})
+            parts += [alt.Chart(line).mark_line(strokeWidth=1.5, strokeDash=[6, 4]).encode(
+                          x="year:O", y="car:Q", color="series:N"),
+                      alt.Chart(point).mark_rule(strokeWidth=2).encode(x="year:O", y="lo:Q", y2="hi:Q", color="series:N"),
+                      alt.Chart(point).mark_point(filled=True, size=90).encode(
+                          x="year:O", y="car:Q", color="series:N",
+                          tooltip=[alt.Tooltip("car:Q", format="+.2%", title=f"{F} forecast"),
+                                   alt.Tooltip("lo:Q", format="+.2%", title=f"{conf}% low"),
+                                   alt.Tooltip("hi:Q", format="+.2%", title=f"{conf}% high")])]
+        st.altair_chart(alt.layer(*parts).properties(height=300), use_container_width=True)
+        if tr:
+            st.caption(f"Least-squares trend: {pct(tr['slope'])} a year (p = {tr['p']:.3f}). The bar is the {conf}% "
+                       f"prediction interval for {F}.")
+    with right:
+        st.subheader("What the big-move model expected")
+        m = g["model"]
+        mdf = pd.DataFrame({"day": days * 2, "share": m["flagged"] + m["big_move"],
+                            "series": ["Flagged by the model"] * len(days) + ["Big move"] * len(days)})
+        ref = pd.DataFrame({"share": [m["base_rate"]]})
+        st.altair_chart(alt.layer(
+            alt.Chart(mdf).mark_line(point=True).encode(
+                x=alt.X("day:Q", title="Trading days from the event", axis=alt.Axis(values=days, format="+d")),
+                y=alt.Y("share:Q", title="Share of retailers", axis=alt.Axis(format="%")),
+                color=legend_color(["Flagged by the model", "Big move"], [BLUE, ORANGE]),
+                tooltip=[alt.Tooltip("series:N"), alt.Tooltip("day:Q", format="+d"),
+                         alt.Tooltip("share:Q", format=".1%")]),
+            alt.Chart(ref).mark_rule(color=GREY, strokeDash=[2, 2]).encode(y="share:Q"),
+        ).properties(height=300), use_container_width=True)
+        st.caption(f"Test years {ev_data['test_years'][0]}–{ev_data['test_years'][1]}, which the model never saw "
+                   f"({m['n'][0]} stock-days per event day). Grey line: big moves on an ordinary day "
+                   f"({m['base_rate']:.1%}). Shares, because the model's scores are not calibrated probabilities.")
+
+    st.subheader("How to read this")
+    significant = [x["name"] for x in ev_data["event_types"]
+                   if x["groups"][group]["trend"] and x["groups"][group]["trend"]["p"] < 1 - ev_data["confidence"]]
+    st.markdown(
+        f"- The forecast is a straight line through {len(g['years'])} yearly values: a trend, not a prediction of "
+        f"the market. {('Only ' + ', '.join(significant) + ' has a trend with p < 0.05') if significant else 'No event has a trend with p < 0.05'} "
+        f"for {group} retailers, and the interval shows how wide one year can be.\n"
+        f"- Every number uses {ev_data['first_year']}–{ev_data['last_year']} data, so {F}'s outcomes are not in it.\n"
+        "- The big-move model predicts tomorrow, not next year. Big moves cluster, and around events its flags often "
+        "come a day after a burst of big moves starts.\n"
+        "- Intervals and p-values for the average count each event date once (clustered), because the retailers "
+        "share each event and move together.")
+
+
+# ---------------------------------------------------------------- about
+
+def about_view():
+    st.markdown(f"""
+**Calendar Effects** is the CMPT 732 (Big Data, SFU) project of Mahad, Sanchi, Anushiya and Areej. It asks
+whether retail stocks move more than the market explains around shopping events (Black Friday, Cyber Monday,
+Prime Day, Halloween, Chinese New Year), and whether Wikipedia attention moves with them.
+
+- **Streaming:** ten years of daily prices and pageviews for {len(retailers())} retailers are replayed through
+  Kafka into Spark Structured Streaming. The job fits a market model for every stock every day, flags abnormal
+  returns and attention spikes, closes each event's cumulative abnormal return (CAR) on its day +5, and scores
+  tomorrow's big moves with a Spark MLlib model.
+- **Checked twice:** a batch event study computes the same CARs independently; all of them match.
+- **This dashboard** is the same app on a laptop and here. *Live stream* shows a real run as it happens;
+  *{REPLAY}* plays the recorded stream; *Event history & forecast* shows each event over the years.
+
+**Show a live run here** (needs a Hugging Face login with write access):
+
+```bash
+python3 src/producers/replay_to_files.py
+python3 src/streaming/job.py --source files --fresh --publish-live
+```
+
+Then choose *Live stream → Online live feed*. Each finished micro-batch appears within about 15 seconds.
+
+**Links:** {" · ".join(f"[{name}]({LINKS[k]})" for k, name in LINK_NAMES.items())} · hosted dashboard: {DASHBOARD_URL}
+
+Only statistics we computed are shown or published: no prices, volumes or raw returns (Yahoo's terms).
+""")
+
+
+def main():
+    st.set_page_config(page_title="Calendar Effects", page_icon="📈", layout="wide")
+    st.title("Calendar Effects")
+    st.caption("Retail stocks and Wikipedia attention around shopping events, streamed through Kafka and Spark "
+               "Structured Streaming, with a Spark MLlib model of tomorrow's big moves.")
+    view = st.radio("View", VIEWS, horizontal=True, label_visibility="collapsed",
+                    index=0 if has_batches(STREAM_DIR) else 1)
+    {VIEWS[0]: live_view, VIEWS[1]: replay_view, VIEWS[2]: event_view, VIEWS[3]: about_view}[view]()
+
+
+if __name__ == "__main__":   # streamlit runs the file as __main__; tests import it
+    main()

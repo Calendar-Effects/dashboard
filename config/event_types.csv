@@ -1,0 +1,13 @@
+event_type,name,category,region,date_rule,in_scope,notes
+us_thanksgiving,US Thanksgiving,holiday,US,nth_weekday:11:thu:4,yes,Anchor for Black Friday and Cyber Monday
+black_friday,Black Friday,shopping,US,offset:us_thanksgiving:+1,yes,Day after US Thanksgiving
+cyber_monday,Cyber Monday,shopping,US,offset:us_thanksgiving:+4,yes,Monday after US Thanksgiving
+prime_day,Amazon Prime Day,shopping,global,listed,yes,Dates announced each year; list them in event_dates.csv with a source and check by hand
+halloween,Halloween,holiday,US;CA,fixed:10-31,yes,
+chinese_new_year,Chinese New Year (Lunar New Year),cultural,global,listed,yes,Lunar calendar; list dates in event_dates.csv from a published table
+ca_thanksgiving,Canadian Thanksgiving,holiday,CA,nth_weekday:10:mon:2,no,Candidate; relevant for TSX tickers
+christmas,Christmas Day,holiday,global,fixed:12-25,no,Candidate
+boxing_day,Boxing Day,shopping,CA,fixed:12-26,no,Candidate; major sales day in Canada
+singles_day,Singles' Day (11.11),shopping,CN,fixed:11-11,no,Candidate; one of the largest online shopping days worldwide
+valentines_day,Valentine's Day,holiday,global,fixed:02-14,no,Candidate
+diwali,Diwali,cultural,global,listed,no,Candidate; lunar calendar

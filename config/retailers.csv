@@ -1,0 +1,41 @@
+ticker,company,country,retailer_type,in_scope,notes
+AMZN,Amazon,US,online,yes,
+EBAY,eBay,US,online,yes,
+ETSY,Etsy,US,online,yes,
+SHOP,Shopify,CA,online,yes,Canadian company; this is its US listing (SHOP.TO on the TSX)
+BABA,Alibaba,CN,online,yes,US-listed shares of a Chinese online retailer; also a Singles' Day candidate
+W,Wayfair,US,online,yes,Online home goods
+JD,JD.com,CN,online,yes,US-listed shares of a Chinese online retailer
+WMT,Walmart,US,store,yes,
+TGT,Target,US,store,yes,
+COST,Costco,US,store,yes,
+BBY,Best Buy,US,store,yes,
+M,Macy's,US,store,yes,
+HD,Home Depot,US,store,yes,
+LOW,Lowe's,US,store,yes,Home improvement
+TJX,TJX Companies,US,store,yes,"Off-price apparel and home (T.J. Maxx, Marshalls)"
+ROST,Ross Stores,US,store,yes,Off-price apparel
+DG,Dollar General,US,store,yes,Discount
+DLTR,Dollar Tree,US,store,yes,Discount
+KR,Kroger,US,store,yes,Grocery
+KSS,Kohl's,US,store,yes,Department store
+DKS,Dick's Sporting Goods,US,store,yes,Sporting goods
+ULTA,Ulta Beauty,US,store,yes,Beauty
+TSCO,Tractor Supply,US,store,yes,Rural lifestyle
+ORLY,O'Reilly Automotive,US,store,yes,Auto parts
+AZO,AutoZone,US,store,yes,Auto parts
+WSM,Williams-Sonoma,US,store,yes,Home furnishings; large online share but classed by its store footprint
+DDS,Dillard's,US,store,yes,Department store
+AEO,American Eagle Outfitters,US,store,yes,Apparel
+ANF,Abercrombie & Fitch,US,store,yes,Apparel
+URBN,Urban Outfitters,US,store,yes,Apparel
+FIVE,Five Below,US,store,yes,Discount
+BURL,Burlington Stores,US,store,yes,Off-price apparel
+CVS,CVS Health,US,store,yes,Pharmacy retail
+CASY,Casey's General Stores,US,store,yes,Convenience stores
+SIG,Signet Jewelers,US,store,yes,Jewelry
+SBH,Sally Beauty Holdings,US,store,yes,Beauty supply
+GCO,Genesco,US,store,yes,Footwear (Journeys)
+OLLI,Ollie's Bargain Outlet,US,store,yes,Discount
+L.TO,Loblaw,CA,store,no,Candidate for Boxing Day and Canadian Thanksgiving; a TSX stock needs a TSX market index (common.study.MARKET_TICKER is SPY)
+CTC-A.TO,Canadian Tire,CA,store,no,Candidate; same TSX market-index caveat as L.TO

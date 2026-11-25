@@ -1,0 +1,21 @@
+event_type,event_date,event_end_date,source
+prime_day,2016-07-12,2016-07-12,https://channelx.world/2024/07/10th-amazon-prime-day-2015-2024/
+prime_day,2017-07-11,2017-07-12,https://www.aol.com/amazon-prime-day-2025-heres-173400317.html
+prime_day,2018-07-16,2018-07-17,https://www.aol.com/amazon-prime-day-2025-heres-173400317.html
+prime_day,2019-07-15,2019-07-16,https://www.aol.com/amazon-prime-day-2025-heres-173400317.html
+prime_day,2020-10-13,2020-10-14,https://www.aol.com/amazon-prime-day-2025-heres-173400317.html (delayed to October due to COVID-19)
+prime_day,2021-06-21,2021-06-22,compiled retail-calendar summary; not independently cross-verified against a second source, double-check before relying on it
+prime_day,2022-07-12,2022-07-13,compiled retail-calendar summary
+prime_day,2023-07-11,2023-07-12,https://www.aboutamazon.com/news/retail/the-history-of-prime-day
+prime_day,2024-07-16,2024-07-17,compiled retail-calendar summary
+prime_day,2025-07-08,2025-07-11,https://www.aol.com/amazon-prime-day-2025-heres-173400317.html
+chinese_new_year,2016-02-08,2016-02-08,https://vclock.com/timer/chinese-new-year/2016/ (cross-checked against calendarific.com)
+chinese_new_year,2017-01-28,2017-01-28,https://vclock.com/timer/chinese-new-year/2017/ (cross-checked against calendarific.com)
+chinese_new_year,2018-02-16,2018-02-16,https://vclock.com/timer/chinese-new-year/2018/
+chinese_new_year,2019-02-05,2019-02-05,https://vclock.com/timer/chinese-new-year/2019/
+chinese_new_year,2020-01-25,2020-01-25,https://vclock.com/timer/chinese-new-year/2020/
+chinese_new_year,2021-02-12,2021-02-12,https://vclock.com/timer/chinese-new-year/2021/
+chinese_new_year,2022-02-01,2022-02-01,https://vclock.com/timer/chinese-new-year/2022/
+chinese_new_year,2023-01-22,2023-01-22,https://vclock.com/timer/chinese-new-year/2023/
+chinese_new_year,2024-02-10,2024-02-10,https://vclock.com/timer/chinese-new-year/2024/
+chinese_new_year,2025-01-29,2025-01-29,https://vclock.com/timer/chinese-new-year/2025/

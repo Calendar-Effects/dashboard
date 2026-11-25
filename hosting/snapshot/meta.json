@@ -1,0 +1,27 @@
+{
+  "built_utc": "2026-11-25T07:42:13+00:00",
+  "code_version": "d690489-dirty",
+  "model": {
+    "model": "gbt",
+    "params": {
+      "maxDepth": 3
+    },
+    "alert_cutoff": 0.7592860803518737,
+    "alert_top_share": 0.05,
+    "fit_years": [
+      2016,
+      2023
+    ],
+    "test_years": [
+      2024,
+      2025
+    ],
+    "test": {
+      "base_rate": 0.051829268292682924,
+      "auc_roc": 0.6883234445039992,
+      "auc_pr": 0.1351746785544291,
+      "precision_top": 0.21497326203208555,
+      "lift_top": 4.1477194086190625
+    }
+  }
+}

@@ -1,0 +1,9 @@
+# What the hosted dashboard installs on Streamlit Community Cloud (decision 0013).
+# scripts/sync_dashboard_app.sh puts this file at the root of the dashboard's repository.
+streamlit
+altair
+pandas>=2.2,<3
+pyarrow
+huggingface_hub
+# The project's own code (src/common, src/dashboard, src/hosting), exactly as on a laptop
+-e .

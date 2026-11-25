@@ -1,0 +1,18 @@
+# Makes src/ an installable package, so `import common` works from any script and any
+# folder. requirements.txt installs it (the `-e .` line); dependencies are pinned there.
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "calendar-effects"
+version = "0.1.0"
+description = "How holidays and shopping events move retail stocks, in real time (CMPT 732)"
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
