@@ -8,7 +8,7 @@ Four views:
   Live stream     the streaming job's output as it is written: today's alerts, tomorrow's watchlist
                   from the big-move model, event CARs as windows close, alerts per day, one retailer.
                   Source: this computer's data/stream/ folder, or the online live feed that the job
-                  publishes with --publish-live (src/hosting/live.py), which is what the hosted app shows.
+                  publishes automatically (src/hosting/live.py), which is what the hosted app shows.
   Replay          the same view over the recorded 2024-2025 stream (the model's test years), played
                   day by day from hosting/snapshot/replay.json (src/hosting/snapshot.py).
   Event history   each event type's CAR path in every year, the average, a straight-line trend to the
@@ -242,7 +242,7 @@ def live_view():
         local_default = has_batches(STREAM_DIR)
         source = st.radio("Source", ["This computer", "Online live feed"], index=0 if local_default else 1,
                           help="This computer: the streaming job's output folder. Online live feed: what a job "
-                               "started with --publish-live publishes, which is what the hosted dashboard shows.")
+                               "signed in to Hugging Face publishes automatically, which is what the hosted dashboard shows.")
         stream_dir = Path(st.text_input("Stream output folder", str(STREAM_DIR))) if source == "This computer" else None
         refresh = st.slider("Refresh every (seconds)", 2, 30, 5)
 
@@ -255,7 +255,7 @@ def live_view():
             current = live_feed()
             if current is None or "error" in current:
                 st.info("No live run is being published right now. To show one here, run the streaming job "
-                        "with `--publish-live` (see the About view), or watch the recorded stream in "
+                        "on a computer signed in to Hugging Face (see the About view), or watch the recorded stream in "
                         f"**{REPLAY}**." + (f"\n\n({current['error']})" if current else ""))
                 return
             from hosting.live import age_seconds, run_state
@@ -263,14 +263,15 @@ def live_view():
             ago = f"{age:.0f} s" if age < 120 else f"{age / 60:.0f} min" if age < 7200 else f"{age / 3600:.0f} h"
             feed = f"[{LIVE_REPO}](https://huggingface.co/datasets/{LIVE_REPO})"
             if state == "live":
-                st.success(f"**● Live now:** run {current['run_id']} is streaming; last update {ago} ago, "
+                st.success(f"**● Live now:** run {current['run_id']} by {current.get('by', 'a teammate')} is "
+                           f"streaming; last update {ago} ago, "
                            f"{n} micro-batches so far. This page refreshes every {refresh} s. ({feed})")
             else:
                 why = ("it finished normally" if state == "finished" else
                        "it stopped without finishing (stopped by hand, or the computer went offline)")
                 st.warning(f"**No run is streaming right now.** Below is where the last run ended: run "
                            f"{current['run_id']}, {n} micro-batches, {why} {ago} ago. To show a run live, start the "
-                           f"job with `--publish-live` (see About); to watch the stream move now, open **{REPLAY}**. "
+                           f"streaming job (see About); to watch the stream move now, open **{REPLAY}**. "
                            f"({feed})")
             folder = current["folder"]
         signals = read_stream("stream_signals", folder)
@@ -467,14 +468,16 @@ Prime Day, Halloween, Chinese New Year), and whether Wikipedia attention moves w
 - **This dashboard** is the same app on a laptop and here. *Live stream* shows a real run as it happens;
   *{REPLAY}* plays the recorded stream; *Event history & forecast* shows each event over the years.
 
-**Show a live run here** (needs a Hugging Face login with write access):
+**Show a live run here.** The streaming job publishes to this page by itself when its computer is signed in
+to Hugging Face with write access to the team's organisation (`hf auth login`). A test cannot take over: a new
+run only appears here once no other run is streaming. `--no-publish-live` keeps a run private.
 
 ```bash
 python3 src/producers/replay_to_files.py
-python3 src/streaming/job.py --source files --fresh --publish-live
+python3 src/streaming/job.py --source files --fresh
 ```
 
-Then choose *Live stream → Online live feed*. Each finished micro-batch appears within about 15 seconds.
+This page opens on *Live stream* while a run is streaming. Each finished micro-batch appears within about 15 seconds.
 
 **Links:** {" · ".join(f"[{name}]({LINKS[k]})" for k, name in LINK_NAMES.items())} · hosted dashboard: {DASHBOARD_URL}
 
