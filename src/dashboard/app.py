@@ -154,6 +154,8 @@ def render_stream(signals: pd.DataFrame, cars: pd.DataFrame, preds: pd.DataFrame
     if signals.empty:
         st.info("No rows for this retailer type yet.")
         return
+    typed = set(names.loc[names["retailer_type"].isin(kinds), "ticker"])
+    cars = cars[cars["ticker"].isin(typed)] if not cars.empty else cars
     today = signals["date"].max()
     on_today = signals[signals["date"] == today]
     alerts_today = on_today[(on_today["abnormal_return"] == 1) | (on_today["attention_spike"] == 1)]
@@ -232,8 +234,8 @@ def render_stream(signals: pd.DataFrame, cars: pd.DataFrame, preds: pd.DataFrame
     days = sorted(signals["date"].unique())[-lookback:]
     window = signals[signals["date"].isin(days)]
     per_day = window.groupby("date")[["abnormal_return", "attention_spike"]].sum()
-    st.line_chart(per_day.rename(columns={"abnormal_return": "abnormal returns",
-                                          "attention_spike": "attention spikes"}), color=[BLUE, ORANGE])
+    fixed_lines(per_day.rename(columns={"abnormal_return": "abnormal returns",
+                                        "attention_spike": "attention spikes"}), [BLUE, ORANGE], "alerts")
 
     if focus:
         st.subheader(f"{focus} · cumulative abnormal return and attention")
@@ -242,8 +244,26 @@ def render_stream(signals: pd.DataFrame, cars: pd.DataFrame, preds: pd.DataFrame
             st.caption("No rows for this retailer in the window yet.")
         else:
             a, b = st.columns(2)
-            a.line_chart(one["ar"].fillna(0).cumsum().rename("cumulative abnormal return"), color=BLUE)
-            b.line_chart(one["z_views"].rename("attention z-score"), color=BLUE)
+            with a:
+                fixed_lines(one["ar"].fillna(0).cumsum().rename("cumulative abnormal return").to_frame(), [BLUE])
+            with b:
+                fixed_lines(one["z_views"].rename("attention z-score").to_frame(), [BLUE])
+
+
+def fixed_lines(data: pd.DataFrame, colors: list[str], y_title: str | None = None, height: int = 260):
+    """One line per column of `data` (indexed by date), in a chart that does not zoom or pan.
+    Streamlit's own line charts zoom when the page is scrolled over them, and the zoom then stays
+    through every refresh of the live view, so the dates no longer match the other charts."""
+    x = data.index.name or "date"
+    long = data.reset_index(names=x).melt(id_vars=x, var_name="series", value_name="value")
+    single = len(data.columns) == 1
+    chart = alt.Chart(long).mark_line().encode(
+        x=alt.X(f"{x}:T", title=None),
+        y=alt.Y("value:Q", title=data.columns[0] if single else y_title),
+        color=alt.value(colors[0]) if single else legend_color(list(data.columns), colors),
+        tooltip=[alt.Tooltip(f"{x}:T", title="date"), alt.Tooltip("series:N", title=""),
+                 alt.Tooltip("value:Q", format=",.3~f")])
+    st.altair_chart(chart.properties(height=height), use_container_width=True)
 
 
 def stream_controls():
