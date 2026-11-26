@@ -28,6 +28,8 @@ RAW_DIR = REPO_ROOT / "raw"                  # downloads; gitignored, never edit
 CLEAN_DIR = REPO_ROOT / "clean"              # cleaned tables; small, committed for the team
 DATA_DIR = REPO_ROOT / "data"                # made by runs; gitignored
 REPLAY_DIR = DATA_DIR / "replay"             # JSON files for running the streaming job without Kafka
+SRC_DIR = REPO_ROOT / "src"                  # the project's Python packages
+DEMO_STREAM_DIR = DATA_DIR / "demo" / "stream"   # where scripts/demo_live.sh writes its run
 STREAM_DIR = DATA_DIR / "stream"             # streaming job output, one subfolder per dataset:
 STREAM_SUBDIRS = {"stream_signals": "signals", "stream_event_car": "event_car",
                   "stream_predictions": "predictions"}

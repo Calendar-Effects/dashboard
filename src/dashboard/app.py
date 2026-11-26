@@ -7,8 +7,9 @@ Hosted (free, Streamlit Community Cloud):   common.settings.DASHBOARD_URL, also 
 Four views:
   Live stream     the streaming job's output as it is written: today's alerts, tomorrow's watchlist
                   from the big-move model, event CARs as windows close, alerts per day, one retailer.
-                  Source: this computer's data/stream/ folder, or the online live feed that the job
-                  publishes with --publish-live (src/hosting/live.py), which is what the hosted app shows.
+                  Shows a published run (the online live feed a job writes with --publish-live,
+                  src/hosting/live.py: the cloud streamer or a laptop) or, on a computer that can run the
+                  job, that job's output folder. The hosted app shows published runs only.
   Replay          the same view over the recorded stream, any range of years (by default the big-move
                   model's test years, which it never saw in training), played day by day from
                   hosting/snapshot/ (replay.json and replay_rows.parquet, src/hosting/snapshot.py).
@@ -23,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 import altair as alt
@@ -34,8 +36,8 @@ from dashboard import reloader
 reloader.refresh()   # a redeploy keeps old modules in memory; reload the project's own if they changed
 
 from common.contracts import expand_events, load_retailers
-from common.settings import (DASHBOARD_URL, LINKS, LIVE_CACHE_DIR, LIVE_REPO, SNAPSHOT_DIR, STREAM_DIR,
-                             STREAM_SUBDIRS)
+from common.settings import (DASHBOARD_URL, DEMO_STREAM_DIR, LINKS, LIVE_CACHE_DIR, LIVE_REPO, REPO_ROOT,
+                             SNAPSHOT_DIR, SRC_DIR, STREAM_DIR, STREAM_SUBDIRS)
 from common.study import (ABNORMAL_RETURN_Z, ATTENTION_SPIKE_Z, ESTIMATION_DAYS, ML_TEST_START_YEAR,
                           STUDY_END_YEAR, STUDY_START_YEAR)
 
@@ -72,8 +74,37 @@ def read_stream(dataset: str, stream_dir: Path) -> pd.DataFrame:
     return df
 
 
-def has_batches(stream_dir: Path) -> bool:
-    return any((Path(stream_dir) / STREAM_SUBDIRS["stream_signals"]).glob("batch_id=*/_SUCCESS"))
+# Where the Live stream view can read a run from. The hosted copy holds only the dashboard's own
+# code, so no streaming job can run next to it, and it offers published runs only.
+PUBLISHED, LOCAL = "Published runs (online)", "A job on this computer"
+CAN_STREAM_HERE = ((SRC_DIR / "streaming" / "job.py").exists()
+                   and os.environ.get("CALENDAR_EFFECTS_HOSTED") != "1")    # the tests set it to act hosted
+
+
+def local_runs() -> list[tuple[Path, float]]:
+    """This computer's stream folders with finished batches (the demo's, then the full run's),
+    newest first, each with the time its latest batch finished."""
+    found = []
+    for folder in (DEMO_STREAM_DIR, STREAM_DIR):
+        marks = list((folder / STREAM_SUBDIRS["stream_signals"]).glob("batch_id=*/_SUCCESS"))
+        if marks:
+            found.append((folder, max(m.stat().st_mtime for m in marks)))
+    return sorted(found, key=lambda run: -run[1])
+
+
+def streaming_here() -> bool:
+    """Is a job writing on this computer right now (a batch finished in the last two minutes)?"""
+    from hosting.live import QUIET_SECONDS
+    runs = local_runs() if CAN_STREAM_HERE else []
+    return bool(runs) and time.time() - runs[0][1] < QUIET_SECONDS
+
+
+def shown(path: Path) -> str:
+    """A folder as people type it: relative to the repository when it is inside it."""
+    try:
+        return str(Path(path).resolve().relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
 
 
 @st.cache_data(ttl=4, show_spinner=False)
@@ -278,23 +309,34 @@ def stream_controls():
 def live_view():
     lookback, kinds, focus = stream_controls()
     with st.sidebar:
-        local_default = has_batches(STREAM_DIR)
-        source = st.radio("Source", ["This computer", "Online live feed"], index=0 if local_default else 1,
-                          help="This computer: the streaming job's output folder. Online live feed: what a job "
-                               "started with --publish-live (scripts/demo_live.sh) publishes, which is what the hosted dashboard shows.")
-        stream_dir = Path(st.text_input("Stream output folder", str(STREAM_DIR))) if source == "This computer" else None
+        stream_dir = None
+        if CAN_STREAM_HERE:
+            runs = local_runs()
+            source = st.radio("Show", [PUBLISHED, LOCAL], index=1 if streaming_here() else 0, help=(
+                f"**{PUBLISHED}:** the run a streaming job publishes, from the cloud streamer on GitHub or "
+                "from `scripts/demo_live.sh` on any laptop. The hosted dashboard shows these. About 15 s behind.\n\n"
+                f"**{LOCAL}:** the output folder of a streaming job running on this computer: no delay, and "
+                "nothing published, as with `scripts/demo_live.sh --private`. It is picked for you while such "
+                "a job is running."))
+            if source == LOCAL:
+                typed = Path(st.text_input("Output folder", shown(runs[0][0] if runs else DEMO_STREAM_DIR),
+                                           help=f"`{shown(DEMO_STREAM_DIR)}`: the live demo (`scripts/demo_live.sh`). "
+                                                f"`{shown(STREAM_DIR)}`: the full run (`run_everything.sh`)."))
+                stream_dir = typed if typed.is_absolute() else REPO_ROOT / typed
+        else:
+            st.caption("Shows the run published by the cloud streamer or a laptop (see About).")
         refresh = st.slider("Refresh every (seconds)", 2, 30, 5)
 
     @st.fragment(run_every=refresh)
     def tick():
         if stream_dir is not None:
             folder = stream_dir
-            st.caption(f"Reading {folder}")
+            st.caption(f"Reading `{shown(folder)}` on this computer")
         else:
             current = live_feed()
             if current is None or "error" in current:
-                st.info("No live run is being published right now. To show one here, run the streaming job "
-                        "with `scripts/demo_live.sh` (see the About view), or watch the recorded stream in "
+                st.info("No live run is being published right now. To show one here, start the cloud streamer "
+                        "or `scripts/demo_live.sh` (see the About view), or watch the recorded stream in "
                         f"**{REPLAY}**." + (f"\n\n({current['error']})" if current else ""))
                 return
             from hosting.live import age_seconds, run_state
@@ -317,9 +359,9 @@ def live_view():
             folder = current["folder"]
         signals = read_stream("stream_signals", folder)
         if signals.empty:
-            st.info("No streaming output yet. Start the replay and the job, for example:\n\n"
-                    "`python3 src/producers/replay_to_files.py` then "
-                    "`python3 src/streaming/job.py --source files --fresh`")
+            st.info(f"No streaming output in `{shown(folder)}` yet. To stream on this computer without "
+                    "publishing, run `scripts/demo_live.sh --private` in a terminal: it writes to "
+                    f"`{shown(DEMO_STREAM_DIR)}`.")
             return
         render_stream(signals, read_stream("stream_event_car", folder), read_stream("stream_predictions", folder),
                       lookback, kinds, focus, batches=signals.attrs["batches"])
@@ -556,11 +598,11 @@ def main():
     st.title("Calendar Effects")
     st.caption("Retail stocks and Wikipedia attention around shopping events, streamed through Kafka and Spark "
                "Structured Streaming, with a Spark MLlib model of tomorrow's big moves.")
-    # Open on Live stream when there is one to watch: this computer's stream (a laptop next to the
-    # job), or a run streaming to the live feed right now (the hosted app during a demo).
+    # Open on Live stream when a run is streaming: a job writing on this computer right now, or a
+    # run streaming to the live feed (the hosted app during a demo). Otherwise open on Replay.
     from hosting.live import run_state
     feed = live_feed()
-    streaming = has_batches(STREAM_DIR) or run_state(feed if feed and "error" not in feed else None) == "live"
+    streaming = streaming_here() or run_state(feed if feed and "error" not in feed else None) == "live"
     view = st.radio("View", VIEWS, horizontal=True, label_visibility="collapsed", index=0 if streaming else 1)
     {VIEWS[0]: live_view, VIEWS[1]: replay_view, VIEWS[2]: event_view, VIEWS[3]: about_view}[view]()
 
